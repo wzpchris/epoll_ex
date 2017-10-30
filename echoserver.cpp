@@ -9,6 +9,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <errno.h>
 #include <strings.h>
 #include <time.h>
@@ -127,7 +129,7 @@ void AcceptConn(int fd, int events, void *arg)
 		EventAdd(g_epollFd, EPOLLIN, &g_Events[i]);
 	}while(0);
 
-	printf("new conn[%s:%d][tiem:%d],pos[%d]\n", inet_ntoa(sin.sin_addr), ntohs(sin.sin_port), g_Events[i].last_active, i);
+	printf("new conn[%s:%d][tiem:%ld],pos[%d]\n", inet_ntoa(sin.sin_addr), ntohs(sin.sin_port), g_Events[i].last_active, i);
 }
 
 // receive data
@@ -148,7 +150,7 @@ void RecvData(int fd, int events, void *arg)
 		EventAdd(g_epollFd, EPOLLOUT, ev);
 	} else if(len == 0) {
 		close(ev->fd);
-		printf("[fd=%d] pos[%d], closed gracefully.\n", fd, ev-g_Events);
+		printf("[fd=%d] pos[%ld], closed gracefully.\n", fd, ev-g_Events);
 	} else {
 		close(ev->fd);
 		printf("rev[fd=%d] error[%d]:%s\n", fd, errno, strerror(errno));
@@ -188,12 +190,12 @@ void InitListenSocket(int epollFd, short port)
 	EventSet(&g_Events[MAX_EVENTS], listenFd, AcceptConn, &g_Events[MAX_EVENTS]);
 
 	//add listen socket
-	EventAdd(epollFd, FPOLLIN, &g_Events[MAX_EVENTS]);
+	EventAdd(epollFd, EPOLLIN, &g_Events[MAX_EVENTS]);
 	//bind & listen
 	sockaddr_in sin;
 	bzero(&sin, sizeof(sin));
 	sin.sin_family = AF_INET;
-	sin.sin_add.s_addr = INADDR_ANY;
+	sin.sin_addr.s_addr = INADDR_ANY;
 	sin.sin_port = htons(port);
 	bind(listenFd, (const sockaddr *)&sin, sizeof(sin));
 	listen(listenFd, 5);
@@ -209,5 +211,53 @@ int main(int argc, char **argv)
 
 	// create epoll
 	g_epollFd = epoll_create(MAX_EVENTS);
+	if(g_epollFd <= 0) printf("create epoll failed.%d\n", g_epollFd);
+
+	InitListenSocket(g_epollFd, port);
 	
+	//event loop
+	struct epoll_event events[MAX_EVENTS];
+	printf("server runing:port[%d]\n", port);
+	
+	int checkPos = 0;
+	while(1)
+	{
+		//a simple timeout check here
+		long now = time(NULL);
+		for(int i = 0; i < 100; ++i)
+		{
+			if(checkPos == MAX_EVENTS) checkPos = 0;
+			if(g_Events[checkPos].status != 1) continue;
+			long duration = now - g_Events[checkPos].last_active;
+			if(duration >= 60)
+			{	
+				close(g_Events[checkPos].fd);
+				printf("[fd=%d] timeout[%ld--%ld].\n", g_Events[checkPos].fd, g_Events[checkPos].last_active, now);
+				EventDel(g_epollFd, &g_Events[checkPos]);
+			}			
+		}
+
+		//wait for events to happen
+		int fds = epoll_wait(g_epollFd, events, MAX_EVENTS, 1000);
+		if(fds < 0)
+		{
+			printf("epoll_wait error, exit\n");
+			break;
+		}	
+
+		for(int i = 0; i < fds; ++i)
+		{
+			myevent_s *ev = (struct myevent_s*)events[i].data.ptr;
+			if((events[i].events & EPOLLIN) && (ev->events & EPOLLIN))
+			{
+				ev->call_back(ev->fd, events[i].events, ev->arg);
+			}
+			if((events[i].events & EPOLLOUT) && (ev->events & EPOLLIN))
+			{
+				ev->call_back(ev->fd, events[i].events, ev->arg);
+			}
+		}
+	}	
+
+	return 0;
 }
